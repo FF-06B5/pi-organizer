@@ -1,0 +1,15 @@
+# Runtime / local data — never publish
+organize.manifest.json
+organize.config.json
+
+# Dependencies
+node_modules/
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Logs & temp
+*.log
+*.tmp
