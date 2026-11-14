@@ -1,26 +1,29 @@
 /**
- * pi-organizer v2 — automatic workspace organizer for Pi sessions.
+ * pi-organizer v3 — automatic workspace organizer for Pi sessions (lazy edition).
  *
- * No commands needed. On every session in a workspace this extension:
- *   1. session_start → creates the standard folder set (01_uploads / 02_deliverables / 03_agent_aux)
- *   2. tool_call (write/edit) → rewrites bare root-level target paths so files land in
- *      the right subfolder automatically (.docx/.pdf → 02_deliverables, else → 03_agent_aux)
- *   3. agent_end → sweeps loose files the agent created in the root during the session
- *      (e.g. pandoc/script outputs) into the same folders
+ * Zero commands, zero upfront clutter:
+ *   - No folders are created when a session starts. Folders appear only when there
+ *     is something to put in them.
+ *   - Files the agent writes straight into the workspace root are rerouted:
+ *       .docx/.pdf -> 02_deliverables/   .md/.py/.html/.txt/... -> 03_agent_aux/
+ *   - For multi-file deliverables (e.g. "10 worksheets + answers") the agent calls
+ *     the `organizer_task` tool once; it creates 02_deliverables/<task>/ and
+ *     03_agent_aux/<task>/ and the agent then writes files into those folders.
+ *   - After each agent turn, shell-generated files (pandoc, compilers...) that the
+ *     agent left in the root during this session are swept into the same folders.
  *
- * "Unless the user asks otherwise": any path the agent writes that is ALREADY nested
- * (e.g. 02_deliverables/x.docx or reports/x.md) is respected and never touched.
- * Files outside the workspace are never touched. Nothing is ever deleted.
- *
- * Config (optional): organize.config.json in the project root — see README.
+ * "Unless the user asks otherwise": nested paths (e.g. reports/custom/x.docx or
+ * 02_deliverables/<task>/exam1.docx) are respected — the extension only makes sure
+ * their parent folders exist. Paths outside the workspace are never touched.
+ * Nothing is ever deleted. Config: organize.config.json (see README).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { Type } from "typebox";
 
 interface OrganizerConfig {
-	auto: boolean;
 	uploads: string;
 	deliverables: string;
 	aux: string;
@@ -30,7 +33,6 @@ interface OrganizerConfig {
 }
 
 const DEFAULT_CONFIG: OrganizerConfig = {
-	auto: true,
 	uploads: "01_uploads",
 	deliverables: "02_deliverables",
 	aux: "03_agent_aux",
@@ -54,19 +56,15 @@ function loadConfig(root: string): OrganizerConfig {
 	}
 }
 
-function ensureFolders(root: string, cfg: OrganizerConfig): string[] {
-	const dirs = [join(root, cfg.uploads), join(root, cfg.deliverables), join(root, cfg.aux)];
-	for (const d of dirs) {
-		mkdirSync(d, { recursive: true });
-	}
-	return dirs;
-}
-
 function classify(relName: string, cfg: OrganizerConfig): "deliverables" | "aux" | "uploads" {
 	const ext = relName.slice(relName.lastIndexOf(".")).toLowerCase();
 	if (cfg.deliverableExtensions.includes(ext)) return "deliverables";
 	if (cfg.auxExtensions.includes(ext)) return "aux";
 	return "uploads";
+}
+
+function bucketDir(root: string, cfg: OrganizerConfig, bucket: "deliverables" | "aux" | "uploads"): string {
+	return join(root, bucket === "deliverables" ? cfg.deliverables : bucket === "aux" ? cfg.aux : cfg.uploads);
 }
 
 function uniqueDest(dest: string): string {
@@ -78,10 +76,7 @@ function uniqueDest(dest: string): string {
 	return `${stem}-${i}${ext}`;
 }
 
-/**
- * Move with retry: antivirus/indexers can hold a just-created file locked for a
- * moment (EPERM/EBUSY), so give the rename a few short attempts before giving up.
- */
+/** Move with retry: antivirus/indexers can lock a just-created file (EPERM/EBUSY). */
 function moveWithRetry(src: string, dest: string, attempts = 3, delayMs = 150): void {
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
@@ -114,26 +109,25 @@ function recordManifest(root: string, originalRel: string, finalRel: string): vo
 	}
 }
 
+const TASK_PARAMS = Type.Object({
+	name: Type.String({ description: "Short task folder name, e.g. 'worksheets-week5' or '期中试卷'" }),
+});
+
 export default function organizerExtension(pi: ExtensionAPI) {
 	let sessionStart = Date.now();
 
-	pi.on("session_start", async (_event, ctx) => {
+	// Lazy: nothing is created here — folders appear only when a file needs one.
+	pi.on("session_start", async () => {
 		sessionStart = Date.now();
-		const root = process.cwd();
-		const cfg = loadConfig(root);
-		if (!cfg.auto) return;
-		ensureFolders(root, cfg);
-		if (ctx.hasUI) {
-			ctx.ui.notify("pi-organizer: workspace folders ready (01_uploads / 02_deliverables / 03_agent_aux)", "info");
-		}
 	});
 
-	// Intercept write/edit: rewrite bare root-level paths into the right subfolder.
+	// Intercept write/edit in the workspace:
+	//  - bare root file  -> reroute into the right folder (create it on demand)
+	//  - nested path     -> keep it, just make sure the parent folder exists
 	pi.on("tool_call", async (event, ctx) => {
 		const name = String(event.toolName || "").toLowerCase();
 		if (name !== "write" && name !== "edit") return undefined;
 		const cfg = loadConfig(process.cwd());
-		if (!cfg.auto) return undefined;
 
 		const input = (event.input || {}) as Record<string, unknown>;
 		const pathKey = "path" in input ? "path" : "file_path" in input ? "file_path" : null;
@@ -145,38 +139,37 @@ export default function organizerExtension(pi: ExtensionAPI) {
 		const abs = isAbsolute(raw) ? resolve(raw) : resolve(root, raw);
 		const rel = relative(root, abs);
 		if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined; // outside workspace
-		if (rel.includes("/") || rel.includes("\\")) return undefined; // already nested → respect it
 
 		const lower = rel.toLowerCase();
 		if (lower.startsWith(".")) return undefined;
 		if (cfg.keepInRoot.some((k) => k === lower)) return undefined;
 
-		const bucket = classify(rel, cfg);
-		const destDir = bucket === "deliverables" ? join(root, cfg.deliverables) : bucket === "aux" ? join(root, cfg.aux) : join(root, cfg.uploads);
-		mkdirSync(destDir, { recursive: true });
-		const finalAbs = uniqueDest(join(destDir, rel));
-
-		input[pathKey] = finalAbs;
-		recordManifest(root, rel, relative(root, finalAbs));
-		if (ctx.hasUI) {
-			ctx.ui.notify(`pi-organizer: ${rel} → ${relative(root, finalAbs)}`, "info");
+		const isBareRoot = !rel.includes("/") && !rel.includes("\\");
+		if (isBareRoot) {
+			const bucket = classify(rel, cfg);
+			const destDir = bucketDir(root, cfg, bucket);
+			mkdirSync(destDir, { recursive: true }); // created only when needed
+			const finalAbs = uniqueDest(join(destDir, rel));
+			input[pathKey] = finalAbs;
+			recordManifest(root, rel, relative(root, finalAbs));
+			if (ctx.hasUI) {
+				ctx.ui.notify(`pi-organizer: ${rel} → ${relative(root, finalAbs)}`, "info");
+			}
+			return undefined;
 		}
+
+		// Nested: respect the agent's/user's choice, but guarantee the parent folder.
+		mkdirSync(resolve(abs, ".."), { recursive: true });
 		return undefined;
 	});
 
-	// Sweep: after each agent turn, file loose root files created this session
-	// (catches bash-generated outputs like pandoc documents).
+	// Sweep: after each agent turn, file loose root files created during this
+	// session (catches bash-generated outputs like pandoc documents).
 	pi.on("agent_end", async (_event, ctx) => {
 		const root = process.cwd();
 		const cfg = loadConfig(root);
-		if (!cfg.auto) return;
-		ensureFolders(root, cfg);
 
 		const keep = new Set(cfg.keepInRoot.map((k) => k.toLowerCase()));
-		const delivDir = join(root, cfg.deliverables);
-		const auxDir = join(root, cfg.aux);
-		const folders = [delivDir, auxDir, join(root, cfg.uploads)];
-
 		const moved: string[] = [];
 		for (const entry of readdirSync(root)) {
 			const full = join(root, entry);
@@ -186,17 +179,19 @@ export default function organizerExtension(pi: ExtensionAPI) {
 			} catch {
 				continue;
 			}
-			if (!st.isFile() || entry.startsWith(".") || folders.includes(full)) continue;
+			if (!st.isFile() || entry.startsWith(".") || entry === MANIFEST) continue;
 			if (keep.has(entry.toLowerCase())) continue;
-			if (st.mtimeMs < sessionStart) continue; // not created this session
+			if ([cfg.uploads, cfg.deliverables, cfg.aux].includes(entry)) continue;
+			if (st.mtimeMs < sessionStart) continue; // existed before the session
+
 			const bucket = classify(entry, cfg);
-			const destDir = bucket === "deliverables" ? delivDir : auxDir; // session-built → never uploads
+			const destDir = bucketDir(root, cfg, bucket);
+			mkdirSync(destDir, { recursive: true }); // created only when needed
 			const finalAbs = uniqueDest(join(destDir, entry));
 			try {
-				const finalAbs2 = uniqueDest(finalAbs);
-				moveWithRetry(full, finalAbs2);
-				moved.push(`${entry} → ${relative(root, finalAbs2)}`);
-				recordManifest(root, entry, relative(root, finalAbs2));
+				moveWithRetry(full, finalAbs);
+				moved.push(`${entry} → ${relative(root, finalAbs)}`);
+				recordManifest(root, entry, relative(root, finalAbs));
 			} catch {
 				moved.push(`FAILED: ${entry}`);
 			}
@@ -204,5 +199,39 @@ export default function organizerExtension(pi: ExtensionAPI) {
 		if (moved.length > 0 && ctx.hasUI) {
 			ctx.ui.notify(`pi-organizer: filed ${moved.length} new file(s)\n${moved.join("\n")}`, "info");
 		}
+	});
+
+	// Task folders on demand: the agent calls this once per multi-file deliverable.
+	pi.registerTool({
+		name: "organizer_task",
+		label: "Create task folders",
+		description:
+			"Create a pair of task folders in the workspace: 02_deliverables/<name>/ and 03_agent_aux/<name>/. " +
+			"Use it whenever the user asks for a multi-file deliverable — for example '写10份试卷，另附答案' or " +
+			"'prepare 10 worksheets plus an answer folder': call it once with a short task name, then write every " +
+			"file of that task inside the returned folders instead of the workspace root.",
+		promptSnippet: "Create paired task folders (deliverables + aux) for multi-file requests",
+		promptGuidelines: [
+			"When the user asks for a multi-file deliverable (e.g. 10 worksheets plus answers, a slide deck plus its build script), call organizer_task once with a short kebab-case name, then write all files of that task inside the returned folders.",
+		],
+		parameters: TASK_PARAMS,
+		async execute(_toolCallId, params) {
+			const cfg = loadConfig(process.cwd());
+			const name = String(params.name || "").trim().replace(/[^\w\u4e00-\u9fa5-]+/g, "-") || "task";
+			const root = process.cwd();
+			const deliv = join(root, cfg.deliverables, name);
+			const aux = join(root, cfg.aux, name);
+			mkdirSync(deliv, { recursive: true });
+			mkdirSync(aux, { recursive: true });
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Task folders ready:\n- deliverables: ${deliv}\n- aux: ${aux}\nWrite the files of this task into these folders.`,
+					},
+				],
+				details: { deliverables: deliv, aux },
+			};
+		},
 	});
 }

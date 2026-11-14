@@ -1,4 +1,4 @@
-// Mock harness for pi-organizer v2 (automatic mode) — run: node test_organizer_v2.mjs
+// Mock harness for pi-organizer v3 (lazy + task folders) — run: node test_organizer_v2.mjs
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,9 +12,10 @@ class MockUI {
   notify(msg) { this.notifications.push(msg); }
 }
 class MockPi {
-  constructor() { this.handlers = {}; }
+  constructor() { this.handlers = {}; this.tools = {}; }
   on(event, handler) { this.handlers[event] = handler; return () => {}; }
-  registerCommand() { throw new Error("v2 must not register commands"); }
+  registerTool(spec) { this.tools[spec.name] = spec; }
+  registerCommand() { throw new Error("v3 must not register commands"); }
 }
 class Ctx {
   constructor(ui) { this.hasUI = true; this.ui = ui; }
@@ -22,7 +23,7 @@ class Ctx {
 
 const runner = { pass: 0, fail: 0 };
 async function test(name, fn) {
-  const sandbox = mkdtempSync(join(tmpdir(), "orgv2-"));
+  const sandbox = mkdtempSync(join(tmpdir(), "orgv3-"));
   process.chdir(sandbox);
   const pi = new MockPi();
   mod.default(pi);
@@ -35,34 +36,54 @@ async function test(name, fn) {
   } catch (e) {
     runner.fail++;
     console.log("FAIL", name, "::", e.message);
+    console.log("  notifications:", JSON.stringify(ctx.ui.notifications));
+    console.log("  root now:", require("node:fs").readdirSync(sandbox));
   } finally {
     process.chdir(tmpdir());
     rmSync(sandbox, { recursive: true, force: true });
   }
 }
 
-await test("session_start creates folder set", async (sb, pi, ctx) => {
-  for (const d of ["01_uploads", "02_deliverables", "03_agent_aux"]) {
-    assert(existsSync(join(sb, d)), d);
-  }
+await test("lazy: session_start creates NOTHING", async (sb) => {
+  assert.ok(!existsSync(join(sb, "01_uploads")), "uploads must not exist yet");
+  assert.ok(!existsSync(join(sb, "02_deliverables")), "deliverables must not exist yet");
+  assert.ok(!existsSync(join(sb, "03_agent_aux")), "aux must not exist yet");
 });
 
-await test("write .docx routed to deliverables", async (sb, pi, ctx) => {
+await test("routing a .docx creates deliverables on demand", async (sb, pi, ctx) => {
   const ev = { toolName: "write", input: { path: "report.docx" } };
   await pi.handlers.tool_call(ev, ctx);
   assert.equal(ev.input.path, join(sb, "02_deliverables", "report.docx"));
+  assert.ok(existsSync(join(sb, "02_deliverables")), "folder created on demand");
+  assert.ok(!existsSync(join(sb, "03_agent_aux")), "unused folders stay unborn");
 });
 
-await test("write .md routed to aux", async (sb, pi, ctx) => {
+await test("routing a .md creates aux on demand", async (sb, pi, ctx) => {
   const ev = { toolName: "write", input: { path: "notes.md" } };
   await pi.handlers.tool_call(ev, ctx);
   assert.equal(ev.input.path, join(sb, "03_agent_aux", "notes.md"));
 });
 
-await test("nested path respected (user-specified location)", async (sb, pi, ctx) => {
-  const ev = { toolName: "write", input: { path: "reports/custom/x.docx" } };
+await test("nested path inside deliverables: parent auto-created, path untouched", async (sb, pi, ctx) => {
+  const ev = { toolName: "write", input: { path: "02_deliverables/期中试卷/卷1.docx" } };
   await pi.handlers.tool_call(ev, ctx);
-  assert.equal(ev.input.path, "reports/custom/x.docx");
+  assert.equal(ev.input.path, "02_deliverables/期中试卷/卷1.docx", "nested path must stay untouched");
+  assert.ok(existsSync(join(sb, "02_deliverables", "期中试卷")), "parent folder auto-created");
+});
+
+await test("nested path elsewhere: parent auto-created, untouched", async (sb, pi, ctx) => {
+  const ev = { toolName: "write", input: { path: "reports/custom/x.md" } };
+  await pi.handlers.tool_call(ev, ctx);
+  assert.equal(ev.input.path, "reports/custom/x.md", "nested path must stay untouched");
+  assert.ok(existsSync(join(sb, "reports", "custom")), "parent auto-created");
+});
+
+await test("organizer_task tool creates both task folders", async (sb, pi) => {
+  assert.ok(pi.tools.organizer_task, "tool must be registered");
+  const res = await pi.tools.organizer_task.execute("t1", { name: "10份试卷" });
+  assert.ok(existsSync(join(sb, "02_deliverables", "10份试卷")));
+  assert.ok(existsSync(join(sb, "03_agent_aux", "10份试卷")));
+  assert.match(res.content[0].text, /10份试卷/);
 });
 
 await test("keepInRoot respected (README.md)", async (sb, pi, ctx) => {
@@ -71,18 +92,24 @@ await test("keepInRoot respected (README.md)", async (sb, pi, ctx) => {
   assert.equal(ev.input.path, "README.md");
 });
 
-await test("outside-workspace absolute path respected", async (sb, pi, ctx) => {
+await test("outside-workspace path respected", async (sb, pi, ctx) => {
   const outside = join(tmpdir(), "outside-asset.png");
   const ev = { toolName: "write", input: { path: outside } };
   await pi.handlers.tool_call(ev, ctx);
   assert.equal(ev.input.path, outside);
 });
 
-await test("agent_end sweeps bash-generated pdf into deliverables", async (sb, pi, ctx) => {
+await test("agent_end sweeps bash-generated pdf (folder on demand)", async (sb, pi, ctx) => {
   writeFileSync(join(sb, "output.pdf"), "%PDF-");
   await pi.handlers.agent_end({}, ctx);
   assert(existsSync(join(sb, "02_deliverables", "output.pdf")));
   assert(!existsSync(join(sb, "output.pdf")));
+});
+
+await test("agent_end with no new files creates NOTHING (lazy)", async (sb, pi, ctx) => {
+  await pi.handlers.agent_end({}, ctx);
+  assert.ok(!existsSync(join(sb, "02_deliverables")), "no empty folders");
+  assert.ok(!existsSync(join(sb, "01_uploads")), "no empty folders");
 });
 
 await test("agent_end keeps pre-session files", async (sb, pi, ctx) => {
@@ -91,7 +118,7 @@ await test("agent_end keeps pre-session files", async (sb, pi, ctx) => {
   const past = Date.now() / 1000 - 86400;
   utimesSync(old, past, past);
   await pi.handlers.agent_end({}, ctx);
-  assert(existsSync(old), "old file must stay in root");
+  assert(existsSync(old), "pre-session file must stay in root");
 });
 
 await test("manifest records routing", async (sb, pi, ctx) => {
@@ -102,12 +129,12 @@ await test("manifest records routing", async (sb, pi, ctx) => {
   assert.equal(manifest.at(-1).to.replaceAll("\\", "/"), "03_agent_aux/a.py");
 });
 
-await test("v2 registers no slash commands", async () => {
+await test("v3 registers no slash commands", async () => {
   const pi = new MockPi();
   let threw = false;
   try { mod.default(pi); } catch { threw = true; }
   assert.ok(!threw, "factory must not throw");
-  assert.ok(!pi.handlers.command, "no command handler expected");
+  assert.ok(pi.tools.organizer_task, "organizer_task tool must exist");
 });
 
 console.log(`\n${runner.pass} passed, ${runner.fail} failed`);

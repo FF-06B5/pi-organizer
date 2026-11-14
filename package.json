@@ -1,7 +1,7 @@
 {
   "name": "pi-organizer",
-  "version": "2.0.0",
-  "description": "Pi extension that AUTOMATICALLY creates a task-based workspace structure and routes every file the agent creates into uploads/deliverables/aux folders. No commands needed. Never deletes.",
+  "version": "3.0.0",
+  "description": "Pi extension: lazy task-based workspace organizer. Folders are created only when files need them; agent-created files are auto-routed into uploads/deliverables/aux; multi-file tasks get paired task folders via the organizer_task tool. No commands, never deletes.",
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -16,5 +16,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typebox": "^1.4.7"
   }
 }

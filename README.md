@@ -1,53 +1,53 @@
-# pi-organizer
+# pi-organizer（工作区自动整理器）
 
-Pi extension that keeps your workspace tidy **automatically** — no commands needed. On every
-session it creates a standard folder set and routes every file the agent creates into the right
-folder. **Never deletes anything.**
+一个 pi 扩展。装上之后**你什么都不用做**：AI 在工作区里创建的每一个文件，都会自动放进对应的文件夹，工作区永远保持整齐。**它只移动文件，从来不删除任何东西。**
 
-Pi 扩展：全自动保持工作区整洁——无需任何命令。每个会话自动创建标准文件夹结构，agent 创建的文件自动归类。**只移动，从不删除。**
+---
 
-## Folder set / 文件夹结构
+## 它帮你维持的样子
 
-| Folder | Purpose | 用途 |
-|---|---|---|
-| `01_uploads/` | Materials you uploaded (papers, course books, data, screenshots) | 你上传的原始资料 |
-| `02_deliverables/` | Files you asked the agent to produce (preferred formats: `.docx` / `.pdf`) | 你要求生成的交付成果 |
-| `03_agent_aux/` | Auxiliary agent files (`.md` sources, scripts, intermediate `.html`/`.txt`) | Agent 的辅助文件 |
+每个工作区最终长这样：
 
-## Install / 安装
-
-```bash
-pi install git:github.com/<you>/pi-organizer@main   # after pushing to GitHub
-pi install ./pi-organizer                            # or from a local copy
+```
+你的项目/
+├── 01_uploads/          ← 你上传给 AI 的资料（PDF、课件、截图……）
+├── 02_deliverables/     ← AI 交付给你的成果（docx、pdf 等）
+├── 03_agent_aux/        ← AI 的中间产物（md 源稿、脚本、临时文件）
+└── （工作区根目录保持干净）
 ```
 
-## How it works / 全自动工作流
+## 它是怎么工作的（不用你操心）
 
-**No commands.** The moment a session starts in any workspace:
-
-1. **Session start** — the folder set is created (if missing).
-2. **While the agent works** — every file it creates with `write`/`edit` directly in the
-   workspace root is transparently rerouted:
+1. **平时什么都没有**——刚打开 pi 不会出现一堆空文件夹。
+2. **AI 第一次创建文件时**，对应的文件夹才自动出现，文件直接放进去：
    - `.docx` / `.pdf` → `02_deliverables/`
-   - `.md` / `.py` / `.html` / `.txt` / `.js` / `.ts` / `.json` → `03_agent_aux/`
-   - anything else → `01_uploads/`
-3. **After each agent turn** — files the agent generated through shell tools (pandoc,
-   compilers, …) are swept from the root into the same folders.
+   - `.md` / `.py` / `.html` / `.txt` 等 → `03_agent_aux/`
+   - 其他类型 → `01_uploads/`
+3. **你要一批文件时**（比如"帮我出 10 份试卷，另附答案"），AI 会调用一次内置工具，自动创建两个任务文件夹：
+   ```
+   02_deliverables/10份试卷/     ← 10 份试卷放这里
+   03_agent_aux/10份试卷/        ← 答案放这里
+   ```
+   然后所有文件各归各位。
+4. AI 用命令行工具生成的文件（比如 pandoc 转的 PDF）也不会散在根目录——每轮对话结束自动归位。
 
-**"Unless the user asks otherwise" / 用户额外要求优先：** paths that are already nested
-(e.g. `reports/custom/x.docx` or `02_deliverables/y.md`) are respected and never touched —
-so when you ask for a specific location, the agent simply writes there. Files outside the
-workspace are never modified.
+**你明确说"放到 XX 文件夹"的话，AI 照你说的放，插件不干预。** 工作区之外的文件也一律不碰。每次移动都记录在 `organize.manifest.json` 里，随时可查。
 
-Every routing decision is logged to `organize.manifest.json` for reference.
+---
 
-## Customization / 自定义
+## 安装
 
-Drop an `organize.config.json` in the project root:
+```bash
+pi install git:github.com/<你的用户名>/pi-organizer@main   # 从 GitHub 装
+pi install ./pi-organizer                                   # 或从本地文件夹装
+```
+
+## 想改规则？
+
+在项目根目录放一个 `organize.config.json`（没有就用默认规则）：
 
 ```json
 {
-  "auto": true,
   "uploads": "01_uploads",
   "deliverables": "02_deliverables",
   "aux": "03_agent_aux",
@@ -57,20 +57,17 @@ Drop an `organize.config.json` in the project root:
 }
 ```
 
-- `"auto": false` disables all automatic behaviour (folders are not created, files stay put).
-- `keepInRoot` lists root files that are never moved.
+## 安全保证
 
-## Safety / 安全
+- **只移动，从不删除**；目标位置重名时自动加 `-2` 后缀
+- 子文件夹内部永远不翻动；会话开始前就存在的文件不动
+- 每次移动都有屏幕提示和 manifest 记录
 
-- **Never deletes**: files are only moved; on name collision a `-2`/`-3` suffix is added.
-- Subfolders are never traversed or reorganized.
-- Pre-existing files (created before the session) are left where they are.
-- All routing decisions are visible as toast notifications and in `organize.manifest.json`.
-
-## Development / 开发
+## 开发
 
 ```bash
-node test_organizer_v2.mjs   # 10 unit tests (mock Pi API, temp sandboxes)
+npm install          # 安装测试依赖
+node test_organizer_v2.mjs   # 13 项单元测试
 ```
 
 ## License
