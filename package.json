@@ -23,10 +23,8 @@
       "./extensions/organizer.ts"
     ]
   },
-  "dependencies": {
-    "typebox": "^1.4.7"
-  },
   "peerDependencies": {
+    "typebox": "*",
     "@earendil-works/pi-coding-agent": "*"
   }
 }
