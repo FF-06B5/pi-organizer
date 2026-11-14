@@ -103,6 +103,13 @@ await test("keyword smart routing: draft .docx goes to aux", async (cwd) => {
   assert.equal(routed, path.join("03_agent_aux", "合同_draft.docx"));
 });
 
+await test("keyword boundary safety: attempt.pdf stays in deliverables", async (cwd) => {
+  const h = createHarness(cwd);
+  await h.emit("session_start");
+  const routed = await h.simulateWrite("attempt.pdf");
+  assert.equal(routed, path.join("02_deliverables", "attempt.pdf"));
+});
+
 await test("nested path inside deliverables: parent auto-created, path untouched", async (cwd) => {
   const h = createHarness(cwd);
   await h.emit("session_start");
@@ -214,12 +221,12 @@ await test("user-dropped reference file in root auto-routes to 01_uploads on rea
 await test("organizer_undo restores moved file and cleans empty folder", async (cwd) => {
   const h = createHarness(cwd);
   await h.emit("session_start");
-  await h.simulateWrite("temp_report.pdf");
-  assert.equal(fs.existsSync(path.join(cwd, "02_deliverables", "temp_report.pdf")), true);
+  await h.simulateWrite("undo_case.pdf");
+  assert.equal(fs.existsSync(path.join(cwd, "02_deliverables", "undo_case.pdf")), true);
 
   const undoTool = h.tools.get("organizer_undo");
   await undoTool.execute("1", { count: 1 }, null, null, { cwd });
-  assert.equal(fs.existsSync(path.join(cwd, "temp_report.pdf")), true);
+  assert.equal(fs.existsSync(path.join(cwd, "undo_case.pdf")), true);
   assert.equal(fs.existsSync(path.join(cwd, "02_deliverables")), false);
 });
 

@@ -70,7 +70,6 @@ const DEFAULT_CONFIG: OrganizerConfig = {
     "方案",
     "交付",
     "试卷",
-    "答案",
     "讲义",
     "大纲",
   ],
@@ -195,19 +194,30 @@ function isProtectedRoot(baseName: string, config: OrganizerConfig): boolean {
   return config.keepInRoot.some((item) => normalizeKey(item) === target);
 }
 
+function matchesKeyword(stem: string, rawKeyword: string): boolean {
+  const kw = rawKeyword.trim().toLowerCase();
+  if (!kw) return false;
+  if (/^[a-z0-9_-]+$/.test(kw)) {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`);
+    return re.test(stem);
+  }
+  return stem.includes(kw);
+}
+
 function classifyFile(fileName: string, config: OrganizerConfig): Bucket {
   const parsed = path.parse(fileName);
   const stem = parsed.name.toLowerCase();
   const ext = parsed.ext.toLowerCase();
 
   for (const kw of config.auxKeywords) {
-    if (kw && stem.includes(kw.toLowerCase())) {
+    if (matchesKeyword(stem, kw)) {
       return "aux";
     }
   }
 
   for (const kw of config.deliverableKeywords) {
-    if (kw && stem.includes(kw.toLowerCase())) {
+    if (matchesKeyword(stem, kw)) {
       return "deliverables";
     }
   }
