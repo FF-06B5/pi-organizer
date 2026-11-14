@@ -1,5 +1,5 @@
-// Mock harness for pi-organizer v3 (lazy + task folders) — run: node test_organizer_v2.mjs
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync, rmSync } from "node:fs";
+// Mock harness for pi-organizer v3.1 (strictly lazy + task folders) — run: node test_organizer_v2.mjs
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert";
@@ -37,7 +37,7 @@ async function test(name, fn) {
     runner.fail++;
     console.log("FAIL", name, "::", e.message);
     console.log("  notifications:", JSON.stringify(ctx.ui.notifications));
-    console.log("  root now:", require("node:fs").readdirSync(sandbox));
+    console.log("  root now:", readdirSync(sandbox));
   } finally {
     process.chdir(tmpdir());
     rmSync(sandbox, { recursive: true, force: true });
@@ -78,12 +78,19 @@ await test("nested path elsewhere: parent auto-created, untouched", async (sb, p
   assert.ok(existsSync(join(sb, "reports", "custom")), "parent auto-created");
 });
 
-await test("organizer_task tool creates both task folders", async (sb, pi) => {
+await test("organizer_task does NOT create empty folders until files are written", async (sb, pi, ctx) => {
   assert.ok(pi.tools.organizer_task, "tool must be registered");
   const res = await pi.tools.organizer_task.execute("t1", { name: "10份试卷" });
-  assert.ok(existsSync(join(sb, "02_deliverables", "10份试卷")));
-  assert.ok(existsSync(join(sb, "03_agent_aux", "10份试卷")));
   assert.match(res.content[0].text, /10份试卷/);
+  assert.ok(!existsSync(join(sb, "02_deliverables")), "must not create deliverables before a file is written");
+  assert.ok(!existsSync(join(sb, "03_agent_aux")), "must not create aux before a file is written");
+
+  // Once a deliverable is actually written, only the deliverables task folder appears
+  const ev = { toolName: "write", input: { path: "卷1.docx" } };
+  await pi.handlers.tool_call(ev, ctx);
+  assert.equal(ev.input.path, join(sb, "02_deliverables", "10份试卷", "卷1.docx"));
+  assert.ok(existsSync(join(sb, "02_deliverables", "10份试卷")));
+  assert.ok(!existsSync(join(sb, "03_agent_aux")), "unused aux folder must still not exist");
 });
 
 await test("keepInRoot respected (README.md)", async (sb, pi, ctx) => {
@@ -112,8 +119,20 @@ await test("agent_end with no new files creates NOTHING (lazy)", async (sb, pi, 
   assert.ok(!existsSync(join(sb, "01_uploads")), "no empty folders");
 });
 
-await test("agent_end keeps pre-session files", async (sb, pi, ctx) => {
+await test("agent_end keeps pre-session files even if mtime is touched", async (sb, pi, ctx) => {
   const old = join(sb, "old.csv");
+  writeFileSync(old, "x");
+  // Re-trigger session_start so old.csv is part of initial root snapshot
+  await pi.handlers.session_start({}, ctx);
+  const now = Date.now() / 1000 + 10;
+  utimesSync(old, now, now);
+  await pi.handlers.agent_end({}, ctx);
+  assert(existsSync(old), "pre-session file must stay in root even if mtime updates");
+  assert(!existsSync(join(sb, "01_uploads")), "no folder created for pre-session file");
+});
+
+await test("agent_end keeps pre-session files with old mtime", async (sb, pi, ctx) => {
+  const old = join(sb, "legacy.csv");
   writeFileSync(old, "x");
   const past = Date.now() / 1000 - 86400;
   utimesSync(old, past, past);

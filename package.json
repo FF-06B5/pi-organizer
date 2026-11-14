@@ -8,16 +8,25 @@
     "pi-extension",
     "organizer"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FF-06B5/pi-organizer.git"
+  },
   "type": "module",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./extensions/organizer.ts"
     ]
   },
+  "dependencies": {
+    "typebox": "^1.4.7"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
-  },
-  "devDependencies": {
-    "typebox": "^1.4.7"
   }
 }

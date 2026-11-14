@@ -1,21 +1,16 @@
 /**
- * pi-organizer v3 — automatic workspace organizer for Pi sessions (lazy edition).
+ * pi-organizer v3.1 — automatic workspace organizer for Pi sessions (strictly lazy edition).
  *
  * Zero commands, zero upfront clutter:
- *   - No folders are created when a session starts. Folders appear only when there
- *     is something to put in them.
+ *   - No folders are created when a session starts or when `organizer_task` is called.
+ *     Folders appear ONLY at the exact moment a new file is actually written or swept.
  *   - Files the agent writes straight into the workspace root are rerouted:
  *       .docx/.pdf -> 02_deliverables/   .md/.py/.html/.txt/... -> 03_agent_aux/
  *   - For multi-file deliverables (e.g. "10 worksheets + answers") the agent calls
- *     the `organizer_task` tool once; it creates 02_deliverables/<task>/ and
- *     03_agent_aux/<task>/ and the agent then writes files into those folders.
- *   - After each agent turn, shell-generated files (pandoc, compilers...) that the
- *     agent left in the root during this session are swept into the same folders.
- *
- * "Unless the user asks otherwise": nested paths (e.g. reports/custom/x.docx or
- * 02_deliverables/<task>/exam1.docx) are respected — the extension only makes sure
- * their parent folders exist. Paths outside the workspace are never touched.
- * Nothing is ever deleted. Config: organize.config.json (see README).
+ *     `organizer_task` once to register a subfolder name; folders are created lazily
+ *     when files are actually written into them.
+ *   - After each agent turn, shell-generated files (pandoc, compilers...) newly created
+ *     in the root during this session are swept into the same folders.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -54,6 +49,18 @@ function loadConfig(root: string): OrganizerConfig {
 	} catch {
 		return DEFAULT_CONFIG;
 	}
+}
+
+function captureRootSnapshot(root: string): Set<string> {
+	const entries = new Set<string>();
+	try {
+		for (const entry of readdirSync(root)) {
+			entries.add(entry.toLowerCase());
+		}
+	} catch {
+		// ignore unreadable directory
+	}
+	return entries;
 }
 
 function classify(relName: string, cfg: OrganizerConfig): "deliverables" | "aux" | "uploads" {
@@ -115,10 +122,14 @@ const TASK_PARAMS = Type.Object({
 
 export default function organizerExtension(pi: ExtensionAPI) {
 	let sessionStart = Date.now();
+	let knownRootFiles = captureRootSnapshot(process.cwd());
+	let activeTask: string | null = null;
 
-	// Lazy: nothing is created here — folders appear only when a file needs one.
+	// Strictly lazy: nothing is created here — folders appear only when a file is actually written.
 	pi.on("session_start", async () => {
 		sessionStart = Date.now();
+		knownRootFiles = captureRootSnapshot(process.cwd());
+		activeTask = null;
 	});
 
 	// Intercept write/edit in the workspace:
@@ -147,8 +158,9 @@ export default function organizerExtension(pi: ExtensionAPI) {
 		const isBareRoot = !rel.includes("/") && !rel.includes("\\");
 		if (isBareRoot) {
 			const bucket = classify(rel, cfg);
-			const destDir = bucketDir(root, cfg, bucket);
-			mkdirSync(destDir, { recursive: true }); // created only when needed
+			const baseDir = bucketDir(root, cfg, bucket);
+			const destDir = activeTask ? join(baseDir, activeTask) : baseDir;
+			mkdirSync(destDir, { recursive: true }); // created only when an actual file is written
 			const finalAbs = uniqueDest(join(destDir, rel));
 			input[pathKey] = finalAbs;
 			recordManifest(root, rel, relative(root, finalAbs));
@@ -158,12 +170,12 @@ export default function organizerExtension(pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		// Nested: respect the agent's/user's choice, but guarantee the parent folder.
+		// Nested: respect the agent's/user's choice, creating the parent folder right as the file is written.
 		mkdirSync(resolve(abs, ".."), { recursive: true });
 		return undefined;
 	});
 
-	// Sweep: after each agent turn, file loose root files created during this
+	// Sweep: after each agent turn, file loose root files newly created during this
 	// session (catches bash-generated outputs like pandoc documents).
 	pi.on("agent_end", async (_event, ctx) => {
 		const root = process.cwd();
@@ -181,11 +193,13 @@ export default function organizerExtension(pi: ExtensionAPI) {
 			}
 			if (!st.isFile() || entry.startsWith(".") || entry === MANIFEST) continue;
 			if (keep.has(entry.toLowerCase())) continue;
+			if (knownRootFiles.has(entry.toLowerCase())) continue; // existed before session
 			if ([cfg.uploads, cfg.deliverables, cfg.aux].includes(entry)) continue;
 			if (st.mtimeMs < sessionStart) continue; // existed before the session
 
 			const bucket = classify(entry, cfg);
-			const destDir = bucketDir(root, cfg, bucket);
+			const baseDir = bucketDir(root, cfg, bucket);
+			const destDir = activeTask ? join(baseDir, activeTask) : baseDir;
 			mkdirSync(destDir, { recursive: true }); // created only when needed
 			const finalAbs = uniqueDest(join(destDir, entry));
 			try {
@@ -201,33 +215,32 @@ export default function organizerExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	// Task folders on demand: the agent calls this once per multi-file deliverable.
+	// Task folder registration on demand: registers the subfolder name without creating empty directories upfront.
 	pi.registerTool({
 		name: "organizer_task",
-		label: "Create task folders",
+		label: "Set task folder name",
 		description:
-			"Create a pair of task folders in the workspace: 02_deliverables/<name>/ and 03_agent_aux/<name>/. " +
-			"Use it whenever the user asks for a multi-file deliverable — for example '写10份试卷，另附答案' or " +
-			"'prepare 10 worksheets plus an answer folder': call it once with a short task name, then write every " +
-			"file of that task inside the returned folders instead of the workspace root.",
-		promptSnippet: "Create paired task folders (deliverables + aux) for multi-file requests",
+			"Register a short task subfolder name for an upcoming multi-file deliverable (e.g. '10份试卷' or 'worksheets-week5'). " +
+			"ONLY call this tool when you are actually about to write multiple files to disk — NEVER call it for normal Q&A or text-only responses. " +
+			"Folders are created lazily only when you actually write files into them.",
+		promptSnippet: "Register a task subfolder name right before writing multi-file deliverables",
 		promptGuidelines: [
-			"When the user asks for a multi-file deliverable (e.g. 10 worksheets plus answers, a slide deck plus its build script), call organizer_task once with a short kebab-case name, then write all files of that task inside the returned folders.",
+			"NEVER call organizer_task when answering questions or when no files will be written to disk.",
+			"ONLY when you are actually about to write multiple files (e.g. 10 worksheets plus answers), call organizer_task once with a short name, then write the files into the returned folders.",
 		],
 		parameters: TASK_PARAMS,
 		async execute(_toolCallId, params) {
 			const cfg = loadConfig(process.cwd());
 			const name = String(params.name || "").trim().replace(/[^\w\u4e00-\u9fa5-]+/g, "-") || "task";
+			activeTask = name;
 			const root = process.cwd();
 			const deliv = join(root, cfg.deliverables, name);
 			const aux = join(root, cfg.aux, name);
-			mkdirSync(deliv, { recursive: true });
-			mkdirSync(aux, { recursive: true });
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Task folders ready:\n- deliverables: ${deliv}\n- aux: ${aux}\nWrite the files of this task into these folders.`,
+						text: `Task folder name '${name}' registered (folders will be created automatically when you write files):\n- deliverables: ${deliv}\n- aux: ${aux}`,
 					},
 				],
 				details: { deliverables: deliv, aux },
